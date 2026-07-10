@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+import asyncio
 import os
 import json
 from dotenv import load_dotenv
@@ -8,11 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 OWNERS_FILE = "owners.json"
-
-# Ensure token is present before starting
-if not TOKEN:
-    print("❌ BOT_TOKEN not set. Please set BOT_TOKEN in your environment or .env file.")
-    raise SystemExit(1)
+UPDATES_ROLE_ID = 1510783082926571580  # الرول اللي يختاره اللاعب بنفسه
 
 intents = discord.Intents.default()
 intents.members = True
@@ -22,36 +19,20 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ============ إدارة الـ Owners ============
 def load_owners():
-    # Prefer the stored file, but be resilient to missing/corrupt files and fallback to env var
-    if os.path.exists(OWNERS_FILE):
-        try:
-            with open(OWNERS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return [int(x) for x in data]
-        except Exception as e:
-            print(f"⚠️ خطأ بقراءة {OWNERS_FILE}: {e}")
-
-    owner_env = os.getenv("OWNER_IDS")
-    if owner_env:
-        try:
-            initial = [int(x.strip()) for x in owner_env.split(",") if x.strip()]
-            save_owners(initial)
-            return initial
-        except Exception as e:
-            print(f"⚠️ خطأ بقراءة OWNER_IDS env: {e}")
-
-    print("⚠️ ما فيه Owners معرفين — ملف owners.json غير موجود و OWNER_IDS غير مضبوط.")
-    return []
+    if not os.path.exists(OWNERS_FILE):
+        initial = [int(x.strip()) for x in os.getenv("OWNER_IDS").split(",")]
+        save_owners(initial)
+        return initial
+    with open(OWNERS_FILE, "r") as f:
+        return json.load(f)
 
 def save_owners(owners_list):
-    with open(OWNERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(owners_list, f, ensure_ascii=False, indent=2)
+    with open(OWNERS_FILE, "w") as f:
+        json.dump(owners_list, f)
 
 OWNER_IDS = load_owners()
 
-def is_owner(user) -> bool:
-    """Accept either a user id or an object with an `id` attribute."""
-    user_id = user if isinstance(user, int) else getattr(user, "id", None)
+def is_owner(user_id: int) -> bool:
     return user_id in OWNER_IDS
 
 # ============ حدث الإقلاع ============
@@ -143,7 +124,7 @@ async def slash_remove_owner(interaction: discord.Interaction, member: discord.M
     save_owners(OWNER_IDS)
     await interaction.response.send_message(f"✅ تم إزالة {member.name}.", ephemeral=True)
 
-# ============ أمر !تنبيه ============
+# ============ !تنبيه و /تنبيه ============
 @bot.command(name="تنبيه")
 async def tanbih(ctx, member: discord.Member):
     if not is_owner(ctx.author.id):
@@ -165,5 +146,91 @@ async def tanbih(ctx, member: discord.Member):
     except discord.HTTPException as e:
         await ctx.send(f"❌ صار خطأ: {e}")
 
+@bot.tree.command(name="تنبيه", description="تنبيه شخص بالرد على تذكرته")
+async def slash_tanbih(interaction: discord.Interaction, member: discord.Member):
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ ما عندك صلاحية.", ephemeral=True)
+        return
+
+    channel_link = f"https://discord.com/channels/{interaction.guild.id}/{interaction.channel.id}"
+    message = (
+        f"مرحباً {member.name} 👋\n"
+        f"اذهب لتذكرتك، نتمنى منك الرد.\n"
+        f"{channel_link}"
+    )
+
+    try:
+        await member.send(message)
+        await interaction.response.send_message(f"✅ تم إرسال التنبيه إلى {member.name}", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(f"❌ مقفل DMs عند {member.name}.", ephemeral=True)
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"❌ خطأ: {e}", ephemeral=True)
+
+# ============ !dmall و /dmall (بس لأعضاء الرول المحدد) ============
+@bot.command(name="dmall")
+async def dm_all(ctx, *, message: str):
+    if not is_owner(ctx.author.id):
+        await ctx.send("❌ ما عندك صلاحية تستخدم هذا الأمر.")
+        return
+
+    role = ctx.guild.get_role(UPDATES_ROLE_ID)
+    if role is None:
+        await ctx.send("⚠️ الرول غير موجود، تأكد من الـ Role ID.")
+        return
+
+    members = [m for m in role.members if not m.bot]
+    if not members:
+        await ctx.send("⚠️ ما فيه أعضاء مشتركين بهذا الرول حالياً.")
+        return
+
+    await ctx.send(f"⏳ جاري الإرسال لـ {len(members)} عضو مشترك بالتحديثات...")
+
+    success = 0
+    failed = 0
+    for member in members:
+        try:
+            await member.send(message)
+            success += 1
+        except discord.Forbidden:
+            failed += 1
+        except discord.HTTPException:
+            failed += 1
+        await asyncio.sleep(1.2)
+
+    await ctx.send(f"✅ تم الإرسال: نجح {success}، فشل {failed}.")
+
+@bot.tree.command(name="dmall", description="إرسال رسالة لأعضاء رول التحديثات فقط")
+async def slash_dm_all(interaction: discord.Interaction, message: str):
+    if not is_owner(interaction.user.id):
+        await interaction.response.send_message("❌ ما عندك صلاحية.", ephemeral=True)
+        return
+
+    role = interaction.guild.get_role(UPDATES_ROLE_ID)
+    if role is None:
+        await interaction.response.send_message("⚠️ الرول غير موجود.", ephemeral=True)
+        return
+
+    members = [m for m in role.members if not m.bot]
+    if not members:
+        await interaction.response.send_message("⚠️ ما فيه أعضاء مشتركين بهذا الرول.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(f"⏳ جاري الإرسال لـ {len(members)} عضو...", ephemeral=True)
+
+    success = 0
+    failed = 0
+    for member in members:
+        try:
+            await member.send(message)
+            success += 1
+        except discord.Forbidden:
+            failed += 1
+        except discord.HTTPException:
+            failed += 1
+        await asyncio.sleep(1.2)
+
+    await interaction.followup.send(f"✅ تم الإرسال: نجح {success}، فشل {failed}.", ephemeral=True)
+
 # ============ تشغيل البوت (لازم يضل آخر شي بالملف) ============
-bot.run(TOKEN)
+bot.run(TOKEN)	
